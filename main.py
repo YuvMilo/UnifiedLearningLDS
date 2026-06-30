@@ -263,7 +263,7 @@ def feature_maps(u: np.ndarray, y: np.ndarray, filters: np.ndarray) -> dict[str,
 
 
 # ---------------------------------------------------------------------------
-# Vovk-Azoury-Warmuth online learner (identical for every predictor).
+# Vovk-Azoury-Warmuth online learner
 # ---------------------------------------------------------------------------
 def vaw_normalized_mse(
     features: np.ndarray, labels: np.ndarray, regularization: float, burn_in: int
