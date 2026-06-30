@@ -1,16 +1,9 @@
-"""Standalone, explicit, multi-seed VAW experiment for the unified predictor.
+"""Reproduces Table 1: a multi-seed comparison of online predictors.
 
-We run the same explicit construction over several random seeds and report the
-range (min--max) of the normalized mean-squared error across them. The spectral
-filters do not depend on the seed, so they are computed once.
-
-Everything is kept explicit on purpose:
-
-    1. an explicit block-diagonal linear dynamical system (A, B, C),
-    2. an explicit controlling input rolled through the state recursion,
-    3. spectral filters defined as eigenvectors of the moment matrix,
-    4. four feature maps (FIR, AR, SF, UF), each of dimension ``BUDGET``,
-    5. ONE generic VAW online learner applied identically to each feature map.
+We build an explicit linear dynamical system (A, B, C) with small instability
+complexity, roll a bounded controlling input through it, and train four feature
+maps (FIR, AR, SF, UF) with the same parameter budget using one shared VAW
+online learner. We average over several seeds and report the normalized MSE.
 
 Run:
 
@@ -33,8 +26,8 @@ T = 200_000               # sequence length
 STABLE_D = 300            # number of stable real modes
 BUDGET = 16               # learned scalar parameters per predictor
 
-# Unified predictor split (matches the paper: k output lags + a short input
-# window + spectral filters). All three add up to BUDGET.
+# Unified predictor split: k output lags + a short input window + spectral
+# filters, adding up to BUDGET.
 UF_AR_ORDER = 3           # output lags (= instability complexity k)
 UF_FIR_LEN = 7            # input lags (finite-memory window)
 UF_H = 6                  # spectral filters
@@ -55,8 +48,6 @@ COMPLEX_SCALE = 1.0
 UNSTABLE_SCALE = 1.0
 
 # Fast-decaying complex modes (do not raise the instability complexity).
-# Their radii are sampled uniformly in [FAST_MIN_RADIUS, FAST_MAX_RADIUS]; both
-# stay below 2/3, so the modes remain fast-decaying for k = 3.
 FAST_COUNT = 100
 FAST_MIN_RADIUS = 0.0
 FAST_MAX_RADIUS = 0.25
@@ -71,11 +62,10 @@ ORDER = ("FIR", "AR", "SF", "UF")
 
 
 # ---------------------------------------------------------------------------
-# Spectral filters: eigenvectors of the moment matrix Z, with
-#   Z[i, j] = integral_{-1}^{1} alpha^{i+j} d alpha .
-# We never form the T x T matrix; we apply Z exactly through its Hankel
-# (moment) structure and ask for the top-h eigenvectors. The filters have the
-# full length T (no truncation, no windowing).
+# Spectral filters: eigenvectors of the moment matrix Z with
+#   Z[i, j] = integral_{-1}^{1} alpha^{i+j} d alpha.
+# Z is applied through its Hankel structure, so the T x T matrix is never
+# formed; the filters have full length T.
 # ---------------------------------------------------------------------------
 def moment_sequence(length: int) -> np.ndarray:
     """m_k = integral_{-1}^1 alpha^k d alpha for k = 0, ..., length-1."""
@@ -94,8 +84,7 @@ def spectral_filters(length: int, num_filters: int) -> np.ndarray:
     moments_fft = fft.rfft(moments, n=fft_len)
 
     def apply_Z(vector: np.ndarray) -> np.ndarray:
-        # (Z v)_i = sum_j m_{i+j} v_j is the exact Hankel product; we evaluate
-        # it as a convolution of v (reversed) with the moment sequence.
+        # (Z v)_i = sum_j m_{i+j} v_j, evaluated as a convolution.
         rev_fft = fft.rfft(vector[::-1], n=fft_len)
         conv = fft.irfft(moments_fft * rev_fft, n=fft_len)
         return conv[length - 1 : 2 * length - 1].copy()
@@ -105,7 +94,7 @@ def spectral_filters(length: int, num_filters: int) -> np.ndarray:
     order = np.argsort(eigenvalues)[::-1]
     filters = eigenvectors[:, order].T  # (h, T)
 
-    # Fix each filter's sign deterministically (largest-magnitude entry > 0).
+    # Deterministic sign: largest-magnitude entry positive.
     for i in range(filters.shape[0]):
         pivot = int(np.argmax(np.abs(filters[i])))
         if filters[i, pivot] < 0.0:
@@ -114,7 +103,7 @@ def spectral_filters(length: int, num_filters: int) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Stable-block construction.
+# System construction.
 # ---------------------------------------------------------------------------
 def hard_ar_coefficients(gamma: float, radius: float, angle: float) -> np.ndarray:
     """AR(3) coefficients whose roots are gamma and radius * exp(+- i angle)."""
@@ -131,8 +120,6 @@ def log_stable_nodes(d: int, max_abs: float) -> np.ndarray:
 
     The distance to the unit circle, 1 - |lambda|, is geometrically spaced
     between 1 - max_abs and 1; half the nodes are positive and half negative.
-    This places many modes close to +-1 (the hard long-memory regime) with a
-    clean deterministic grid -- no perturbation needed.
     """
     half = d // 2
     gaps = np.logspace(np.log10(1.0 - max_abs), 0.0, half)  # 1 - max_abs ... 1
@@ -146,12 +133,11 @@ def log_stable_nodes(d: int, max_abs: float) -> np.ndarray:
 def fit_stable_readout(diagonal: np.ndarray, target_residual: np.ndarray, alphas: np.ndarray) -> np.ndarray:
     """Fit a readout C so the AR residual of the stable impulse matches the target.
 
-    The stable block has eigenvalues ``diagonal``, input B = 1, and readout C
-    (to be found). Its impulse response is h_t = sum_i C_i * diagonal_i^t.
-    For t >= k, the AR residual h_t - sum_lag alpha_lag h_{t-lag} equals
-    sum_i (C_i * factor_i) * diagonal_i^{t-k}, where factor_i is the AR
-    characteristic polynomial evaluated at diagonal_i. We therefore solve a
-    plain least-squares problem in the tail powers and divide by factor_i.
+    The stable block has eigenvalues ``diagonal``, input B = 1, and readout C.
+    Its impulse response is h_t = sum_i C_i * diagonal_i^t; for t >= k the AR
+    residual equals sum_i (C_i * factor_i) * diagonal_i^{t-k}, where factor_i is
+    the AR characteristic polynomial at diagonal_i. We solve a least-squares
+    problem in the tail powers and divide by factor_i.
     """
     k = len(alphas)
     length = len(target_residual)
@@ -186,7 +172,7 @@ def complex_pair_peak(length: int, radius: float, angle: float) -> float:
 
 
 def block_diagonal(blocks: list[np.ndarray]) -> np.ndarray:
-    """Assemble an explicit dense block-diagonal matrix."""
+    """Assemble a dense block-diagonal matrix."""
     total = sum(b.shape[0] for b in blocks)
     A = np.zeros((total, total), dtype=np.float64)
     offset = 0
@@ -198,10 +184,9 @@ def block_diagonal(blocks: list[np.ndarray]) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Input: keep the unstable mode bounded by exact feedback. With desired state
-# z_t in {-1, +1} and dynamics x_t = gamma x_{t-1} + u_t, choosing
-# u_t = z_t - gamma z_{t-1} forces x_t = z_t, so the realized trajectory stays
-# bounded even though the open-loop mode is unstable.
+# Input and rollout. The unstable mode is kept bounded by exact feedback: with
+# desired state z_t in {-1, +1} and x_t = gamma x_{t-1} + u_t, choosing
+# u_t = z_t - gamma z_{t-1} forces x_t = z_t, so the trajectory stays bounded.
 # ---------------------------------------------------------------------------
 def controlling_input(length: int, gamma: float, rng: np.random.Generator) -> np.ndarray:
     u = np.zeros(length, dtype=np.float64)
@@ -214,7 +199,7 @@ def controlling_input(length: int, gamma: float, rng: np.random.Generator) -> np
 
 
 def rollout(A: np.ndarray, B: np.ndarray, C: np.ndarray, u: np.ndarray) -> np.ndarray:
-    """Explicit state-space rollout: x_t = A x_{t-1} + B u_t, y_t = C x_t."""
+    """State-space rollout: x_t = A x_{t-1} + B u_t, y_t = C x_t."""
     n = A.shape[0]
     x = np.zeros(n, dtype=np.float64)
     b = B[:, 0]
@@ -256,7 +241,6 @@ def spectral_features(u: np.ndarray, filters: np.ndarray) -> np.ndarray:
     h = filters.shape[0]
     F = np.zeros((T_local, h), dtype=np.float64)
     for s in range(h):
-        # fftconvolve computes the exact convolution; we keep the causal part.
         F[:, s] = fftconvolve(u, filters[s], mode="full")[:T_local]
     return F
 
@@ -279,18 +263,16 @@ def feature_maps(u: np.ndarray, y: np.ndarray, filters: np.ndarray) -> dict[str,
 
 
 # ---------------------------------------------------------------------------
-# Generic VAW online learner (identical for every predictor).
+# Vovk-Azoury-Warmuth online learner (identical for every predictor).
 # ---------------------------------------------------------------------------
 def vaw_normalized_mse(
     features: np.ndarray, labels: np.ndarray, regularization: float, burn_in: int
 ) -> float:
-    """Vovk-Azoury-Warmuth forecaster; returns final-window normalized MSE.
+    """VAW forecaster; returns final-window normalized MSE.
 
-    At step t (after seeing features but before the label):
-        A_t = A_{t-1} + a_t a_t^T,   prediction = a_t^T A_t^{-1} v_{t-1},
-    then observe b_t and update v_t = v_{t-1} + b_t a_t. We maintain A_t^{-1}
-    with the Sherman-Morrison rank-one update. The trivial zero predictor has
-    normalized MSE 1.
+    At step t: A_t = A_{t-1} + a_t a_t^T, prediction = a_t^T A_t^{-1} v_{t-1},
+    then observe b_t and update v_t = v_{t-1} + b_t a_t. A_t^{-1} is maintained
+    with the Sherman-Morrison rank-one update. The zero predictor scores 1.
     """
     X = features
     n, d = X.shape
@@ -321,7 +303,7 @@ def build_system(rng: np.random.Generator, filters: np.ndarray):
     alphas = hard_ar_coefficients(GAMMA, COMPLEX_RADIUS, COMPLEX_ANGLE)
 
     # Target for the stable AR residual: a late-weighted signed combination of
-    # the first STABLE_TARGET_RANK spectral filters (later filters weigh more).
+    # the first STABLE_TARGET_RANK spectral filters.
     signs = rng.choice(np.array([-1.0, 1.0]), size=STABLE_TARGET_RANK)
     weights = np.linspace(1.0, LATE_WEIGHT, STABLE_TARGET_RANK)
     target = (signs * weights) @ filters[:STABLE_TARGET_RANK]
@@ -345,7 +327,7 @@ def build_system(rng: np.random.Generator, filters: np.ndarray):
         fast_blocks.append(complex_block(radius, angle))
         fast_C.append(FAST_SCALE * rng.normal(size=(1, 2)))
 
-    # Assemble explicit A, B, C.
+    # Assemble A, B, C.
     blocks = [np.diag(stable_diagonal), complex_block(COMPLEX_RADIUS, COMPLEX_ANGLE)]
     blocks.append(np.array([[GAMMA]], dtype=np.float64))
     blocks.extend(fast_blocks)
